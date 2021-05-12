@@ -1,0 +1,92 @@
+menu "Example Configuration"
+	config EXAMPLE_GYRO_CALIBRATE
+		bool "Calibrate Gyroscope at the beginning"
+		default y
+
+	config EXAMPLE_I2C_CLOCK_FREQ
+		int "I2C Clock Frequency"
+		default 400000
+
+	config EXAMPLE_I2C_SDA_GPIO
+		int "I2C SDA GPIO pin"
+		default 21
+
+	config EXAMPLE_I2C_SCL_GPIO
+		int "I2C SCL GPIO pin"
+		default 22
+
+
+	config ESP_WIFI_SSID
+        string "WiFi SSID"
+        default "myssid"
+        help
+            SSID (network name) for the example to connect to.
+
+    config ESP_WIFI_PASSWORD
+        string "WiFi Password"
+        default "mypassword"
+        help
+            WiFi password (WPA or WPA2) for the example to use.
+
+    config ESP_MAXIMUM_RETRY
+        int "Maximum retry"
+        default 5
+        help
+            Set the Maximum retry to avoid station reconnecting to the AP unlimited when the AP is really inexistent.
+
+
+    config EXAMPLE_IPV4
+        bool "IPV4"
+        default y
+
+    config EXAMPLE_IPV6
+        bool "IPV6"
+        default n
+        select EXAMPLE_CONNECT_IPV6
+
+    config EXAMPLE_IPV4_ADDR
+    	string "IPV4 Address"
+    	default "192.168.1.13"
+    	depends on EXAMPLE_IPV4
+    	help
+    		The program will send the measurements to this IPV4 address.
+
+    config EXAMPLE_PORT
+        int "Port"
+        range 0 65535
+        default 3333
+        help
+            Local port the example server will listen on.
+
+    config EXAMPLE_KEEPALIVE_IDLE
+        int "TCP keep-alive idle time(s)"
+        default 5
+        help
+            Keep-alive idle time. In idle time without receiving any data from peer, will send keep-alive probe packet
+
+    config EXAMPLE_KEEPALIVE_INTERVAL
+        int "TCP keep-alive interval time(s)"
+        default 5
+        help
+            Keep-alive probe packet interval time.
+
+    config EXAMPLE_KEEPALIVE_COUNT
+        int "TCP keep-alive packet retry send counts"
+        default 3
+        help
+            Keep-alive probe packet retry count.
+endmenu
+
+menu "Buzzer"
+	config BUZZER_GPIO
+		int "Buzzer GPIO pin"
+		default 15
+		help
+			GPIO pin where the buzzer is connected.
+
+	config BUZZER_SOUND_TEST
+		bool "Buzzer sound test on init"
+		default y
+		help
+			Play a scale when the buzzer is initialized
+endmenu

@@ -1,6 +1,3 @@
-[submodule "esp32-mpu6050"]
-	path = esp32-mpu6050
-	url = git://github.com/gabrielbvicari/esp32-mpu6050
 [submodule "components/esp32-mpu6050"]
 	path = components/esp32-mpu6050
 	url = git://github.com/gabrielbvicari/esp32-mpu6050
