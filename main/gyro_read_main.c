@@ -64,8 +64,8 @@ static const char *MAIN_TAG = "Main";
 static const char *GYRO_TAG = "GyroReading";
 TaskHandle_t GyroTaskHandle = NULL;
 
-static const char *TCP_TAG = "TcpComms";
-TaskHandle_t TcpTaskHandle = NULL;
+static const char *UDP_TAG = "UdpComms";
+TaskHandle_t UdpTaskHandle = NULL;
 
 static const char *BUZZER_TAG = "Buzzer";
 TaskHandle_t BuzzerTaskHandle = NULL;
@@ -81,7 +81,7 @@ QueueHandle_t gpio_event_queue;
 buzzer_t *buzzer = NULL;
 
 
-// TCP --------------------------------------------------------------------------------------------------
+// UDP --------------------------------------------------------------------------------------------------
 
 #if defined(CONFIG_EXAMPLE_IPV4)
 #define HOST_IP_ADDR CONFIG_EXAMPLE_IPV4_ADDR
@@ -149,7 +149,7 @@ void buzzerTask(void *pvParameters) {
 }
 
 
-void tcpTask(void *pvParameters) {
+void udpTask(void *pvParameters) {
     char host_ip[] = HOST_IP_ADDR;
     int addr_family = 0;
     int ip_protocol = 0;
@@ -174,19 +174,19 @@ void tcpTask(void *pvParameters) {
         struct sockaddr_storage dest_addr = { 0 };
         ESP_ERROR_CHECK(get_addr_from_stdin(PORT, SOCK_STREAM, &ip_protocol, &addr_family, &dest_addr));
 #endif
-        int sock = socket(addr_family, SOCK_STREAM, ip_protocol);
+        int sock = socket(addr_family, SOCK_DGRAM, ip_protocol); /// Create an UDP socket
         if (sock < 0) {
-            ESP_LOGE(TCP_TAG, "Unable to create socket: errno %d", errno);
+            ESP_LOGE(UDP_TAG, "Unable to create socket: errno %d", errno);
             break;
         }
-        ESP_LOGI(TCP_TAG, "Socket created, connecting to %s:%d", host_ip, PORT);
+        ESP_LOGI(UDP_TAG, "Socket created, sending to %s:%d", host_ip, PORT);
 
-        int err = connect(sock, (struct sockaddr *) &dest_addr, sizeof(struct sockaddr_in6));
-        if (err != 0) {
-            ESP_LOGE(TCP_TAG, "Socket unable to connect: errno %d", errno);
-            break;
-        }
-        ESP_LOGI(TCP_TAG, "Successfully connected");
+//        int err = connect(sock, (struct sockaddr *) &dest_addr, sizeof(struct sockaddr_in6));
+//        if (err != 0) {
+//            ESP_LOGE(TCP_TAG, "Socket unable to connect: errno %d", errno);
+//            break;
+//        }
+//        ESP_LOGI(TCP_TAG, "Successfully connected");
 
         while (1) {
             uint32_t newvalue;
@@ -194,18 +194,20 @@ void tcpTask(void *pvParameters) {
                 char payload[100];
                 snprintf(payload, 100, "%i\n", (int32_t) newvalue);
 
-                err = send(sock, payload, strlen(payload), 0);
+                /// Send via UDP to the server
+                int err = sendto(sock, payload, strlen(payload), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+                //err = send(sock, payload, strlen(payload), 0);
                 if (err < 0) {
-                    ESP_LOGE(TCP_TAG, "Error occurred during sending: errno %d", errno);
+                    ESP_LOGE(UDP_TAG, "Error occurred during sending: errno %d", errno);
                     break;
                 }
             } else {
-                ESP_LOGW(TCP_TAG, "Time run out while waiting for notification, waiting again...");
+                ESP_LOGW(UDP_TAG, "Time run out while waiting for notification, waiting again...");
             }
         }
 
         if (sock != -1) {
-            ESP_LOGE(TCP_TAG, "Shutting down socket and restarting...");
+            ESP_LOGE(UDP_TAG, "Shutting down socket and restarting...");
             shutdown(sock, 0);
             close(sock);
         }
@@ -230,7 +232,7 @@ void gyroTask(void *pvParameters) {
             //ESP_LOGI(GYRO_TAG, "MPU data ready: acceleration=(%i, %i, %i), pitch= %lf", acceleration.accel_x, acceleration.accel_y, acceleration.accel_z, pitch);
             //printf("Pitch: [%lf]\n", pitch);
 
-            xTaskGenericNotify(TcpTaskHandle, (int32_t) pitch, eSetValueWithOverwrite, NULL);
+            xTaskGenericNotify(UdpTaskHandle, (int32_t) pitch, eSetValueWithOverwrite, NULL);
             xTaskGenericNotify(BuzzerTaskHandle, (int32_t)pitch, eSetValueWithOverwrite, NULL);
         } else {
             ESP_LOGW(GYRO_TAG, "Time run out while waiting for notification, waiting again...");
@@ -436,8 +438,8 @@ void app_main(void) {
 
     ESP_LOGI(MAIN_TAG, "MPU is connected!");
 
-    ESP_LOGI(MAIN_TAG, "Starting the TCP communication task...");
-    xTaskCreatePinnedToCore(tcpTask, "TcpCommTask", 4096, NULL, 3, &TcpTaskHandle, 1);
+    ESP_LOGI(MAIN_TAG, "Starting the UDP communication task...");
+    xTaskCreatePinnedToCore(udpTask, "UdpCommTask", 4096, NULL, 3, &UdpTaskHandle, 1);
 
     ESP_LOGI(MAIN_TAG, "Starting the buzzer task...");
     xTaskCreate(buzzerTask, "BuzzerTask", 1024, NULL, 2, &BuzzerTaskHandle);
