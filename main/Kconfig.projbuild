@@ -1,21 +1,4 @@
-menu "Example Configuration"
-	config EXAMPLE_GYRO_CALIBRATE
-		bool "Calibrate Gyroscope at the beginning"
-		default y
-
-	config EXAMPLE_I2C_CLOCK_FREQ
-		int "I2C Clock Frequency"
-		default 400000
-
-	config EXAMPLE_I2C_SDA_GPIO
-		int "I2C SDA GPIO pin"
-		default 21
-
-	config EXAMPLE_I2C_SCL_GPIO
-		int "I2C SCL GPIO pin"
-		default 22
-
-
+menu "Network Configuration"
 	config ESP_WIFI_SSID
         string "WiFi SSID"
         default "myssid"
@@ -75,6 +58,34 @@ menu "Example Configuration"
         default 3
         help
             Keep-alive probe packet retry count.
+endmenu
+
+menu "MPU6050"
+	config MPU_CALIBRATE
+    	bool "Calibrate Gyroscope at the beginning"
+    	default n
+
+    config MPU_SELFTEST
+    	bool "Perform self test at the beginning"
+    	default y
+
+    config MPU_I2C_CLOCK_FREQ
+    	int "I2C Clock Frequency"
+    	default 400000
+
+    config MPU_I2C_SDA_GPIO
+    	int "I2C SDA GPIO pin"
+    	default 21
+
+    config MPU_I2C_SCL_GPIO
+    	int "I2C SCL GPIO pin"
+    	default 22
+
+    config MPU_INT_GPIO
+    	int "INT GPIO pin"
+    	default 18
+    	help
+    		GPIO pin connected to the INT pin in the MPU6050
 endmenu
 
 menu "Buzzer"

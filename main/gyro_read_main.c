@@ -55,9 +55,9 @@ static int s_retry_num = 0;
 
 // I2C -------------------------------------------------------------------------------------------------
 
-#define I2C_FREQ CONFIG_EXAMPLE_I2C_CLOCK_FREQ
-#define I2C_SDA_PIN CONFIG_EXAMPLE_I2C_SDA_GPIO
-#define I2C_SCL_PIN CONFIG_EXAMPLE_I2C_SCL_GPIO
+#define I2C_FREQ CONFIG_MPU_I2C_CLOCK_FREQ
+#define I2C_SDA_PIN CONFIG_MPU_I2C_SDA_GPIO
+#define I2C_SCL_PIN CONFIG_MPU_I2C_SCL_GPIO
 
 static const char *MAIN_TAG = "Main";
 
@@ -73,6 +73,10 @@ TaskHandle_t BuzzerTaskHandle = NULL;
 float self_test[6] = {0};
 float accel_calibration[3] = {0};
 float gyro_calibration[3] = {0};
+
+#define GYRO_SAMPLING_RATE 20
+
+QueueHandle_t gpio_event_queue;
 
 buzzer_t *buzzer = NULL;
 
@@ -93,7 +97,7 @@ buzzer_t *buzzer = NULL;
 // GPIO -------------------------------------------------------------------------------------------------
 #define BUZZER_PIN CONFIG_BUZZER_GPIO
 
-#define GYRO_SAMPLING_RATE 4
+
 
 
 /**
@@ -115,17 +119,26 @@ double calculate_pitch(int accel_x, int accel_y, int accel_z) {
     return pitch;
 }
 
+static void IRAM_ATTR mpu_int_handler(void *param) {
+    //ESP_EARLY_LOGI("INT", "Interrupt!\n");
+    xTaskGenericNotifyFromISR(GyroTaskHandle, 1, eNoAction, NULL, NULL);
+    //xTaskNotifyFromISR(GyroTaskHandle, 1, eSetValueWithoutOverwrite, NULL);
+}
+
 void buzzerTask(void *pvParameters) {
-    int32_t lastValue = 0;
+    //int32_t lastValue = 0;
+    uint8_t last_final_note = 0;
     while (1) {
         uint32_t newvalue;
         if (xTaskNotifyWait(0, 0, &newvalue, 0xFFFF) == pdPASS) {
             int32_t val = (int32_t) newvalue;
-            if (newvalue == lastValue) continue;
-            lastValue = newvalue;
+            //if (newvalue == lastValue) continue;
+            //lastValue = newvalue;
             val += 90;
             uint8_t deg_per_note = 180 / BUZZER_NOTE_MAX;
             uint8_t final_note = val / deg_per_note;
+            if (final_note == last_final_note) continue;
+            last_final_note = final_note;
             //buzzer_pause(buzzer);
             buzzer_set_note(buzzer, final_note, 4);
             buzzer_play(buzzer);
@@ -202,25 +215,28 @@ void tcpTask(void *pvParameters) {
 
 
 void gyroTask(void *pvParameters) {
-
-
     for (;;) {
-        mpu6050_acceleration_t acceleration;
-        mpu6050_rotation_t rotation;
+        /// Wait until there's new data to be read in the MPU's FIFO queue (until we receive the interrupt)
+        if (xTaskNotifyWait(0, 0, NULL, 0xFFFF) == pdPASS) {
+            mpu6050_acceleration_t acceleration;
 
-        mpu6050_get_motion(&acceleration, &rotation);
+            mpu6050_get_acceleration(&acceleration);
 
-        printf("Accelerometer: [x(%i), y(%i), z(%i)], ", acceleration.accel_x, acceleration.accel_y,
-               acceleration.accel_z);
-        printf("Gyroscope: [x(%i), y(%i), z(%i)] ", rotation.gyro_x, rotation.gyro_y, rotation.gyro_z);
+            //printf("Accelerometer: [x(%i), y(%i), z(%i)], ", acceleration.accel_x, acceleration.accel_y,
+            //       acceleration.accel_z);
+            //printf("Gyroscope: [x(%i), y(%i), z(%i)] ", rotation.gyro_x, rotation.gyro_y, rotation.gyro_z);
 
-        double pitch = calculate_pitch(acceleration.accel_x, acceleration.accel_y, acceleration.accel_z);
+            double pitch = calculate_pitch(acceleration.accel_x, acceleration.accel_y, acceleration.accel_z);
+            //ESP_LOGI(GYRO_TAG, "MPU data ready: acceleration=(%i, %i, %i), pitch= %lf", acceleration.accel_x, acceleration.accel_y, acceleration.accel_z, pitch);
+            //printf("Pitch: [%lf]\n", pitch);
 
+            xTaskGenericNotify(TcpTaskHandle, (int32_t) pitch, eSetValueWithOverwrite, NULL);
+            xTaskGenericNotify(BuzzerTaskHandle, (int32_t)pitch, eSetValueWithOverwrite, NULL);
+        } else {
+            ESP_LOGW(GYRO_TAG, "Time run out while waiting for notification, waiting again...");
+        }
 
-        xTaskGenericNotify(TcpTaskHandle, (int32_t) pitch, eSetValueWithOverwrite, NULL);
-        xTaskGenericNotify(BuzzerTaskHandle, (int32_t)pitch, eSetValueWithOverwrite, NULL);
-        printf("Pitch: [%lf]\n", pitch);
-        vTaskDelay(pdMS_TO_TICKS(1000 / GYRO_SAMPLING_RATE));
+        //vTaskDelay(pdMS_TO_TICKS(1000 / GYRO_SAMPLING_RATE));
     }
 }
 
@@ -336,9 +352,9 @@ static esp_err_t i2c_initialize() {
 static esp_err_t gyro_initialize() {
     ESP_LOGI(mpu6050_get_tag(), "Initializing MPU6050...");
 
+#ifdef CONFIG_MPU_SELFTEST
     ESP_LOGI(mpu6050_get_tag(), "Performing self-test...");
     mpu6050_self_test(self_test);
-
 
     // Check if self test passed for every axis
     if (self_test[0] >= 1.0f || self_test[1] >= 1.0f || self_test[2] >= 1.0f || self_test[3] >= 1.0f ||
@@ -348,15 +364,39 @@ static esp_err_t gyro_initialize() {
     }
 
     ESP_LOGI(mpu6050_get_tag(), "Passed self-test");
+#endif
 
     mpu6050_reset();
-#ifdef CONFIG_EXAMPLE_GYRO_CALIBRATE
+#ifdef CONFIG_MPU_CALIBRATE
     ESP_LOGI(mpu6050_get_tag(), "Performing calibration...");
     mpu6050_calibrate(accel_calibration, gyro_calibration);
     ESP_LOGI(mpu6050_get_tag(), "Calibration successful");
 #endif
     ESP_LOGI(mpu6050_get_tag(), "Initializing...");
     mpu6050_init();
+
+    /// Set up the GPIO for the interrupt
+    gpio_config_t gpio_conf = {
+            .intr_type = GPIO_INTR_POSEDGE, /// Rising edge
+            .pin_bit_mask =  (1ULL << (uint)CONFIG_MPU_INT_GPIO), /// Select the INT pin
+            .pull_up_en = GPIO_PULLUP_ENABLE, /// Enable pull-up
+            .pull_down_en = GPIO_PULLDOWN_DISABLE, /// Disable pull-down
+            .mode = GPIO_MODE_INPUT /// Input mode
+    };
+    gpio_config(&gpio_conf);
+
+    // /// Create an event queue for the interrupt events
+    //gpio_event_queue = xQueueCreate(10, sizeof(uint32_t));
+
+    /// Install GPIO interrupt service
+    gpio_install_isr_service(0);
+
+    /// Add the ISR handler for the INT pin
+    gpio_isr_handler_add(CONFIG_MPU_INT_GPIO, mpu_int_handler, NULL);
+
+    mpu6050_set_interrupt_mode(1); /// Set the interrupt mode to active low
+    /// Enable the data ready interrupt to know when we have new readings
+    mpu6050_set_int_data_ready_enabled(true);
 
     mpu6050_set_dlpf_mode(MPU6050_DLPF_BW_20);
     return ESP_OK;
@@ -369,122 +409,7 @@ static void buzzer_initialize() {
 
 
 #ifdef CONFIG_BUZZER_SOUND_TEST
-    buzzer_melody_t m;
-    buzzer_musical_note_t notes[] = {
-            {BUZZER_NOTE_E, 4, BUZZER_NTYPE_QUAVER_DOTTED},
-            {BUZZER_NOTE_D, 4, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_C, 4, BUZZER_NTYPE_CROTCHET},
-            {BUZZER_NOTE_C, 4, BUZZER_NTYPE_CROTCHET},
-            {BUZZER_NOTE_C, 4, BUZZER_NTYPE_QUAVER_DOTTED},
-            {BUZZER_NOTE_G, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_C, 4, BUZZER_NTYPE_QUAVER_DOTTED},
-            {BUZZER_NOTE_D, 4, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_E, 4, BUZZER_NTYPE_CROTCHET_DOTTED},
-            {BUZZER_NOTE_D, 4, BUZZER_NTYPE_QUAVER},
-            {BUZZER_NOTE_C, 4, BUZZER_NTYPE_CROTCHET},
-            {BUZZER_NOTE_C, 4, BUZZER_NTYPE_QUAVER_DOTTED},
-            {BUZZER_NOTE_E, 4, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_F, 4, BUZZER_NTYPE_CROTCHET_DOTTED},
-            {BUZZER_NOTE_F, 4, BUZZER_NTYPE_QUAVER},
-            {BUZZER_NOTE_E, 4, BUZZER_NTYPE_QUAVER_DOTTED},
-            {BUZZER_NOTE_D, 4, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_C, 4, BUZZER_NTYPE_QUAVER_DOTTED},
-            {BUZZER_NOTE_E, 4, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_D, 4, BUZZER_NTYPE_MINIM},
-            {BUZZER_NOTE_D, 4, BUZZER_NTYPE_QUAVER},
-            {BUZZER_NOTE_D, 4, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_D, 4, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_E, 4, BUZZER_NTYPE_QUAVER_DOTTED},
-            {BUZZER_NOTE_D, 4, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_C, 4, BUZZER_NTYPE_CROTCHET},
-            {BUZZER_NOTE_G, 3, BUZZER_NTYPE_CROTCHET},
-            {BUZZER_NOTE_C, 4, BUZZER_NTYPE_CROTCHET},
-            {BUZZER_NOTE_B, 3, BUZZER_NTYPE_QUAVER_DOTTED},
-            {BUZZER_NOTE_C, 4, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_D, 4, BUZZER_NTYPE_CROTCHET_DOTTED},
-            {BUZZER_NOTE_D, 4, BUZZER_NTYPE_QUAVER},
-            {BUZZER_NOTE_G, 3, BUZZER_NTYPE_QUAVER_DOTTED},
-            {BUZZER_NOTE_G, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_G, 4, BUZZER_NTYPE_QUAVER_DOTTED},
-            {BUZZER_NOTE_F, 4, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_E, 4, BUZZER_NTYPE_CROTCHET_DOTTED},
-            {BUZZER_NOTE_D, 4, BUZZER_NTYPE_QUAVER},
-            {BUZZER_NOTE_C, 4, BUZZER_NTYPE_CROTCHET},
-            {BUZZER_NOTE_B, 3, BUZZER_NTYPE_QUAVER_DOTTED},
-            {BUZZER_NOTE_C, 4, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_D, 4, BUZZER_NTYPE_CROTCHET_DOTTED},
-            {BUZZER_NOTE_D, 4, BUZZER_NTYPE_QUAVER},
-            {BUZZER_NOTE_G, 3, BUZZER_NTYPE_QUAVER_DOTTED},
-            {BUZZER_NOTE_G, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_G, 4, BUZZER_NTYPE_QUAVER_DOTTED},
-            {BUZZER_NOTE_F, 4, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_E, 4, BUZZER_NTYPE_CROTCHET_DOTTED},
-            {BUZZER_NOTE_D, 4, BUZZER_NTYPE_QUAVER},
-            {BUZZER_NOTE_E, 4, BUZZER_NTYPE_CROTCHET},
-            {BUZZER_NOTE_E, 4, BUZZER_NTYPE_CROTCHET},
-            {BUZZER_NOTE_E, 4, BUZZER_NTYPE_CROTCHET_DOTTED},
-            {BUZZER_NOTE_F, 4, BUZZER_NTYPE_QUAVER},
-            {BUZZER_NOTE_E, 4, BUZZER_NTYPE_QUAVER_DOTTED},
-            {BUZZER_NOTE_D, 4, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_C, 4, BUZZER_NTYPE_QUAVER_DOTTED},
-            {BUZZER_NOTE_B, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_C, 4, BUZZER_NTYPE_CROTCHET},
-            {BUZZER_NOTE_D, 4, BUZZER_NTYPE_CROTCHET},
-            {BUZZER_NOTE_E, 4, BUZZER_NTYPE_CROTCHET},
-            {BUZZER_NOTE_E, 4, BUZZER_NTYPE_QUAVER_DOTTED},
-            {BUZZER_NOTE_E, 4, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_F, 4, BUZZER_NTYPE_CROTCHET},
-            {BUZZER_NOTE_E, 4, BUZZER_NTYPE_QUAVER_DOTTED},
-            {BUZZER_NOTE_D, 4, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_C, 4, BUZZER_NTYPE_CROTCHET},
-            {BUZZER_NOTE_B, 3, BUZZER_NTYPE_CROTCHET},
-            {BUZZER_NOTE_A, 3, BUZZER_NTYPE_CROTCHET},
-            {BUZZER_NOTE_G, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_G, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_G, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_G, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_G, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_G, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_G, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_G, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_E, 4, BUZZER_NTYPE_QUAVER_DOTTED},
-            {BUZZER_NOTE_D, 4, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_C, 4, BUZZER_NTYPE_CROTCHET},
-            {BUZZER_NOTE_C, 4, BUZZER_NTYPE_CROTCHET},
-            {BUZZER_NOTE_C, 4, BUZZER_NTYPE_QUAVER_DOTTED},
-            {BUZZER_NOTE_G, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_C, 4, BUZZER_NTYPE_QUAVER_DOTTED},
-            {BUZZER_NOTE_D, 4, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_E, 4, BUZZER_NTYPE_CROTCHET_DOTTED},
-            {BUZZER_NOTE_D, 4, BUZZER_NTYPE_QUAVER},
-            {BUZZER_NOTE_C, 4, BUZZER_NTYPE_CROTCHET},
-            {BUZZER_NOTE_G, 3, BUZZER_NTYPE_CROTCHET},
-            {BUZZER_NOTE_C, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_D, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_E, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_F, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_E, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_E, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_E, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_E, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_G, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_G, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_G, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_G, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_G, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_A, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_B, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_G, 3, BUZZER_NTYPE_SEMIQUAVER},
-            {BUZZER_NOTE_C, 4, BUZZER_NTYPE_CROTCHET},
-            {BUZZER_NOTE_E, 4, BUZZER_NTYPE_CROTCHET},
-            {BUZZER_NOTE_C, 4, BUZZER_NTYPE_MINIM},
-    };
-
-    m.melody = notes;
-    m.length = sizeof(notes) / sizeof(buzzer_musical_note_t);
-
-    //buzzer_play_melody(buzzer, &m, 110);
-
+    ESP_LOGI(buzzer_get_tag(), "Playing test melody");
     buzzer_play_test(buzzer, 100);
 #endif
 }
@@ -509,10 +434,6 @@ void app_main(void) {
     ESP_LOGI(MAIN_TAG, "Installing the I2C driver...");
     i2c_initialize();
 
-    ESP_LOGI(MAIN_TAG, "Initializing MPU6050...");
-    gyro_initialize();
-
-
     ESP_LOGI(MAIN_TAG, "MPU is connected!");
 
     ESP_LOGI(MAIN_TAG, "Starting the TCP communication task...");
@@ -525,4 +446,6 @@ void app_main(void) {
     xTaskCreatePinnedToCore(gyroTask, "GyroReadTask", 4096, NULL, 4, &GyroTaskHandle, 0);
     buzzer_play_note_ms(buzzer, BUZZER_NOTE_A, 4, 500);
 
+    ESP_LOGI(MAIN_TAG, "Initializing MPU6050...");
+    gyro_initialize();
 }
