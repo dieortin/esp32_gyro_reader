@@ -1,3 +1,5 @@
+# Author: Diego Ortín Fernández
+
 menu "Network Configuration"
 	config ESP_WIFI_SSID
         string "WiFi SSID"

@@ -1,11 +1,10 @@
-/* Hello World Example
-
-   This example code is in the Public Domain (or CC0 licensed, at your option.)
-
-   Unless required by applicable law or agreed to in writing, this
-   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-   CONDITIONS OF ANY KIND, either express or implied.
-*/
+/**
+ * @file gyro_read_main.c
+ * @author Diego Ortín Fernández
+ * @date 12-5-2021
+ * @brief This file contains the main code for the IMU reader module. It reads accelerometer data from an MPU6050 and relays
+ * it over UDP to the other module. It also varies the pitch of a buzzer depending on the current inclination.
+ */
 #include <stdio.h>
 #include <sys/param.h>
 #include "sdkconfig.h"
@@ -30,13 +29,9 @@
 
 
 // WIFI ----------------------------------------------------------------------------------------------
-/* The examples use WiFi configuration that you can set via project configuration menu
-   If you'd rather not, just change the below entries to strings with
-   the config you want - ie #define EXAMPLE_WIFI_SSID "mywifissid"
-*/
-#define EXAMPLE_ESP_WIFI_SSID      CONFIG_ESP_WIFI_SSID
-#define EXAMPLE_ESP_WIFI_PASS      CONFIG_ESP_WIFI_PASSWORD
-#define EXAMPLE_ESP_MAXIMUM_RETRY  CONFIG_ESP_MAXIMUM_RETRY
+#define EXAMPLE_ESP_WIFI_SSID      CONFIG_ESP_WIFI_SSID ///< SSID of the Wi-Fi network
+#define EXAMPLE_ESP_WIFI_PASS      CONFIG_ESP_WIFI_PASSWORD ///< Password of the Wi-Fi network
+#define EXAMPLE_ESP_MAXIMUM_RETRY  CONFIG_ESP_MAXIMUM_RETRY ///< Maximum number of retries when connecting to Wi-Fi
 
 /* FreeRTOS event group to signal when we are connected*/
 static EventGroupHandle_t s_wifi_event_group;
@@ -49,7 +44,7 @@ static EventGroupHandle_t s_wifi_event_group;
 
 static const char *WIFI_TAG = "wifi station";
 
-static int s_retry_num = 0;
+static int s_retry_num = 0; ///< Number of retries
 
 
 
@@ -70,34 +65,27 @@ TaskHandle_t UdpTaskHandle = NULL;
 static const char *BUZZER_TAG = "Buzzer";
 TaskHandle_t BuzzerTaskHandle = NULL;
 
+/// Values for self-test and calibration of the MPU
 float self_test[6] = {0};
 float accel_calibration[3] = {0};
 float gyro_calibration[3] = {0};
 
 #define GYRO_SAMPLING_RATE 20
 
-QueueHandle_t gpio_event_queue;
-
-buzzer_t *buzzer = NULL;
+buzzer_t *buzzer = NULL; ///< Global variable to store the buzzer object
 
 
 // UDP --------------------------------------------------------------------------------------------------
 
 #if defined(CONFIG_EXAMPLE_IPV4)
-#define HOST_IP_ADDR CONFIG_EXAMPLE_IPV4_ADDR
-#elif defined(CONFIG_EXAMPLE_IPV6)
-#define HOST_IP_ADDR CONFIG_EXAMPLE_IPV6_ADDR
-#else
-#define HOST_IP_ADDR ""
+#define HOST_IP_ADDR CONFIG_EXAMPLE_IPV4_ADDR ///< IP where the data must be sent
 #endif
 
-#define PORT CONFIG_EXAMPLE_PORT
+#define PORT CONFIG_EXAMPLE_PORT ///< Port where the data must be sent
 
 
 // GPIO -------------------------------------------------------------------------------------------------
-#define BUZZER_PIN CONFIG_BUZZER_GPIO
-
-
+#define BUZZER_PIN CONFIG_BUZZER_GPIO ///< GPIO pin where the buzzer is connected
 
 
 /**
@@ -119,17 +107,28 @@ double calculate_pitch(int accel_x, int accel_y, int accel_z) {
     return pitch;
 }
 
-static void IRAM_ATTR mpu_int_handler(void *param) {
+
+/**
+ * This function handles interrupts coming from the INT pin in the MPU6050.
+ * When the interrupt occurs, it sends a notification to the gyroscope task so it can read the new value from the MPU.
+ */
+static void IRAM_ATTR mpu_int_handler() {
     //ESP_EARLY_LOGI("INT", "Interrupt!\n");
     xTaskGenericNotifyFromISR(GyroTaskHandle, 1, eNoAction, NULL, NULL);
     //xTaskNotifyFromISR(GyroTaskHandle, 1, eSetValueWithoutOverwrite, NULL);
 }
 
-void buzzerTask(void *pvParameters) {
+/**
+ * This function is a FreeRTOS task, which handles playing a different sound out of the buzzer depending on the current
+ * pitch angle of the MPU.
+ */
+void buzzerTask() {
     //int32_t lastValue = 0;
     uint8_t last_final_note = 0;
     while (1) {
         uint32_t newvalue;
+
+        /// Wait until receiving a notification with the new pitch value
         if (xTaskNotifyWait(0, 0, &newvalue, 0xFFFF) == pdPASS) {
             int32_t val = (int32_t) newvalue;
             //if (newvalue == lastValue) continue;
@@ -140,7 +139,7 @@ void buzzerTask(void *pvParameters) {
             if (final_note == last_final_note) continue;
             last_final_note = final_note;
             //buzzer_pause(buzzer);
-            buzzer_set_note(buzzer, final_note, 4);
+            buzzer_set_note(buzzer, final_note, 4); /// Play the note
             buzzer_play(buzzer);
         } else {
             ESP_LOGW(BUZZER_TAG, "Time run out while waiting for notification, waiting again...");
@@ -148,10 +147,12 @@ void buzzerTask(void *pvParameters) {
     }
 }
 
-
-void udpTask(void *pvParameters) {
-    char host_ip[] = HOST_IP_ADDR;
-    int addr_family = 0;
+/**
+ * This function is a FreeRTOS task, which handles sending the calculated pitch data to the server via UDP.
+ */
+void udpTask() {
+    char host_ip[] = HOST_IP_ADDR; ///< IP where we want to send the data
+    int addr_family = 0; ///< Address family to use
     int ip_protocol = 0;
 
     while (1) {
@@ -162,17 +163,6 @@ void udpTask(void *pvParameters) {
         dest_addr.sin_port = htons(PORT);
         addr_family = AF_INET;
         ip_protocol = IPPROTO_IP;
-#elif defined(CONFIG_EXAMPLE_IPV6)
-        struct sockaddr_in6 dest_addr = { 0 };
-        inet6_aton(host_ip, &dest_addr.sin6_addr);
-        dest_addr.sin6_family = AF_INET6;
-        dest_addr.sin6_port = htons(PORT);
-        dest_addr.sin6_scope_id = esp_netif_get_netif_impl_index(EXAMPLE_INTERFACE);
-        addr_family = AF_INET6;
-        ip_protocol = IPPROTO_IPV6;
-#elif defined(CONFIG_EXAMPLE_SOCKET_IP_INPUT_STDIN)
-        struct sockaddr_storage dest_addr = { 0 };
-        ESP_ERROR_CHECK(get_addr_from_stdin(PORT, SOCK_STREAM, &ip_protocol, &addr_family, &dest_addr));
 #endif
         int sock = socket(addr_family, SOCK_DGRAM, ip_protocol); /// Create an UDP socket
         if (sock < 0) {
@@ -181,13 +171,6 @@ void udpTask(void *pvParameters) {
         }
         ESP_LOGI(UDP_TAG, "Socket created, sending to %s:%d", host_ip, PORT);
 
-//        int err = connect(sock, (struct sockaddr *) &dest_addr, sizeof(struct sockaddr_in6));
-//        if (err != 0) {
-//            ESP_LOGE(TCP_TAG, "Socket unable to connect: errno %d", errno);
-//            break;
-//        }
-//        ESP_LOGI(TCP_TAG, "Successfully connected");
-
         while (1) {
             uint32_t newvalue;
             if (xTaskNotifyWait(0, 0, &newvalue, 0xFFFF) == pdPASS) {
@@ -195,8 +178,7 @@ void udpTask(void *pvParameters) {
                 snprintf(payload, 100, "%i\n", (int32_t) newvalue);
 
                 /// Send via UDP to the server
-                int err = sendto(sock, payload, strlen(payload), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
-                //err = send(sock, payload, strlen(payload), 0);
+                int err = sendto(sock, payload, strlen(payload), 0, (struct sockaddr *) &dest_addr, sizeof(dest_addr));
                 if (err < 0) {
                     ESP_LOGE(UDP_TAG, "Error occurred during sending: errno %d", errno);
                     break;
@@ -215,33 +197,39 @@ void udpTask(void *pvParameters) {
     vTaskDelete(NULL);
 }
 
-
-void gyroTask(void *pvParameters) {
+/**
+ * This function is a FreeRTOS task. It handles reading new accelerometer data from the MPU when it gets a message via
+ * interrupt, and notifying the gyroscope and buzzer tasks.
+ */
+void gyroTask() {
     for (;;) {
         /// Wait until there's new data to be read in the MPU's FIFO queue (until we receive the interrupt)
         if (xTaskNotifyWait(0, 0, NULL, 0xFFFF) == pdPASS) {
             mpu6050_acceleration_t acceleration;
 
-            mpu6050_get_acceleration(&acceleration);
+            mpu6050_get_acceleration(&acceleration); /// Obtain the accelerometer data
 
             //printf("Accelerometer: [x(%i), y(%i), z(%i)], ", acceleration.accel_x, acceleration.accel_y,
             //       acceleration.accel_z);
             //printf("Gyroscope: [x(%i), y(%i), z(%i)] ", rotation.gyro_x, rotation.gyro_y, rotation.gyro_z);
 
+            /// Calculate the pitch using the accelerometer data
             double pitch = calculate_pitch(acceleration.accel_x, acceleration.accel_y, acceleration.accel_z);
             //ESP_LOGI(GYRO_TAG, "MPU data ready: acceleration=(%i, %i, %i), pitch= %lf", acceleration.accel_x, acceleration.accel_y, acceleration.accel_z, pitch);
             //printf("Pitch: [%lf]\n", pitch);
 
+            /// Notify the other tasks, including the calculated pitch in the notification
             xTaskGenericNotify(UdpTaskHandle, (int32_t) pitch, eSetValueWithOverwrite, NULL);
-            xTaskGenericNotify(BuzzerTaskHandle, (int32_t)pitch, eSetValueWithOverwrite, NULL);
+            xTaskGenericNotify(BuzzerTaskHandle, (int32_t) pitch, eSetValueWithOverwrite, NULL);
         } else {
             ESP_LOGW(GYRO_TAG, "Time run out while waiting for notification, waiting again...");
         }
-
-        //vTaskDelay(pdMS_TO_TICKS(1000 / GYRO_SAMPLING_RATE));
     }
 }
 
+/**
+ * This function handles events related to Wi-Fi connectivity.
+ */
 static void event_handler(void *arg, esp_event_base_t event_base,
                           int32_t event_id, void *event_data) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
@@ -264,6 +252,9 @@ static void event_handler(void *arg, esp_event_base_t event_base,
     }
 }
 
+/**
+ * This function initializes Wi-Fi in station mode, connecting to the specified Access Point.
+ */
 void wifi_init_sta(void) {
     s_wifi_event_group = xEventGroupCreate();
 
@@ -312,17 +303,17 @@ void wifi_init_sta(void) {
     /* Waiting until either the connection is established (WIFI_CONNECTED_BIT) or connection failed for the maximum
      * number of re-tries (WIFI_FAIL_BIT). The bits are set by event_handler() (see above) */
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                                           (uint) WIFI_CONNECTED_BIT | (uint)WIFI_FAIL_BIT,
                                            pdFALSE,
                                            pdFALSE,
                                            portMAX_DELAY);
 
     /* xEventGroupWaitBits() returns the bits before the call returned, hence we can test which event actually
      * happened. */
-    if (bits & WIFI_CONNECTED_BIT) {
+    if (bits & (uint) WIFI_CONNECTED_BIT) {
         ESP_LOGI(WIFI_TAG, "connected to ap SSID:%s password:%s",
                  EXAMPLE_ESP_WIFI_SSID, EXAMPLE_ESP_WIFI_PASS);
-    } else if (bits & WIFI_FAIL_BIT) {
+    } else if (bits & (uint) WIFI_FAIL_BIT) {
         ESP_LOGI(WIFI_TAG, "Failed to connect to SSID:%s, password:%s",
                  EXAMPLE_ESP_WIFI_SSID, EXAMPLE_ESP_WIFI_PASS);
     } else {
@@ -335,7 +326,10 @@ void wifi_init_sta(void) {
     vEventGroupDelete(s_wifi_event_group);
 }
 
-
+/**
+ * This function initializes i2c for communication with the MPU.
+ * @return ESP_FAIL if an error happened, ESP_OK otherwise
+ */
 static esp_err_t i2c_initialize() {
     i2c_config_t conf = {
             .mode = I2C_MODE_MASTER,
@@ -351,6 +345,11 @@ static esp_err_t i2c_initialize() {
     return ESP_OK;
 }
 
+/**
+ * This function initializes the MPU, tests it and calibrates it depending on the options set.
+ * It also initializes the GPIO pin for receiving interrupts from the MPU, and registers the interrup handler.
+ * @return ESP_FAIL if an error ocurred, ESP_OK otherwise
+ */
 static esp_err_t gyro_initialize() {
     ESP_LOGI(mpu6050_get_tag(), "Initializing MPU6050...");
 
@@ -380,7 +379,7 @@ static esp_err_t gyro_initialize() {
     /// Set up the GPIO for the interrupt
     gpio_config_t gpio_conf = {
             .intr_type = GPIO_INTR_POSEDGE, /// Rising edge
-            .pin_bit_mask =  (1ULL << (uint)CONFIG_MPU_INT_GPIO), /// Select the INT pin
+            .pin_bit_mask =  (1ULL << (uint) CONFIG_MPU_INT_GPIO), /// Select the INT pin
             .pull_up_en = GPIO_PULLUP_ENABLE, /// Enable pull-up
             .pull_down_en = GPIO_PULLDOWN_DISABLE, /// Disable pull-down
             .mode = GPIO_MODE_INPUT /// Input mode
@@ -405,6 +404,10 @@ static esp_err_t gyro_initialize() {
 
 }
 
+/**
+ * This function initializes the buzzer and stores it in the global variable. If configured to do so, it also plays
+ * the test melody to test it.
+ */
 static void buzzer_initialize() {
     ESP_LOGI(buzzer_get_tag(), "Initializing buzzer in pin %i", BUZZER_PIN);
     buzzer = buzzer_init(LEDC_CHANNEL_0, LEDC_TIMER_0, BUZZER_PIN);
@@ -416,6 +419,9 @@ static void buzzer_initialize() {
 #endif
 }
 
+/**
+ * Main function of the module, which executes on boot and initializes all the components and tasks.
+ */
 void app_main(void) {
     //Initialize NVS
     esp_err_t ret = nvs_flash_init();
